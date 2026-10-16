@@ -202,12 +202,48 @@ def tbl(t):
     if t not in tables():
         if t in CORE: return render_template("setup.html", t=t)
         abort(404)
-    cols, fks = meta(t); names = [c["name"] for c in cols]
-    s, order, d = request.args.get("q", "").strip(), request.args.get("order", ""), "DESC" if request.args.get("dir") == "desc" else "ASC"
-    sql, p = f"SELECT rowid,* FROM {q(t)}", []
-    if s: sql += " WHERE " + " OR ".join(f"CAST({q(n)} AS TEXT) LIKE ?" for n in names); p = [f"%{s}%"] * len(names)
-    if order in names: sql += f" ORDER BY {q(order)} {d}"
-    return render_template("table.html", t=t, cols=cols, rows=run(sql, p)[1], q=s, order=order, d=d, fkopt=fk_options(fks))
+    cols, fks = meta(t)
+names = [c["name"] for c in cols]
+
+s = request.args.get("q", "").strip()
+
+sql = f"SELECT rowid,* FROM {q(t)}"
+p = []
+
+if s:
+    conditions = [
+        f"CAST({q(n)} AS TEXT) LIKE ?" for n in names
+    ]
+
+    p = [f"%{s}%"] * len(names)
+
+    # Also match column names
+    matching_columns = [
+        n for n in names if s.lower() in n.lower()
+    ]
+
+    if matching_columns:
+        sql += " WHERE " + " OR ".join(conditions)
+    else:
+        sql += " WHERE " + " OR ".join(conditions)
+
+if request.args.get("order", "") in names:
+    order = request.args.get("order")
+    direction = (
+        "DESC" if request.args.get("dir") == "desc" else "ASC"
+    )
+    sql += f" ORDER BY {q(order)} {direction}"
+
+return render_template(
+    "table.html",
+    t=t,
+    cols=cols,
+    rows=run(sql, p)[1],
+    q=s,
+    order=request.args.get("order", ""),
+    d="DESC" if request.args.get("dir") == "desc" else "ASC",
+    fkopt=fk_options(fks)
+)
 
 @app.route("/table/<t>/add", methods=["POST"])
 @login_required
