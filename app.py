@@ -203,47 +203,29 @@ def tbl(t):
         if t in CORE: return render_template("setup.html", t=t)
         abort(404)
     cols, fks = meta(t)
-names = [c["name"] for c in cols]
+    names = [c["name"] for c in cols]
+    s = request.args.get("q", "").strip()
+    mode = "data" if request.args.get("mode") == "data" else "column"   # default: search column names
+    order = request.args.get("order", "")
+    if order not in names: order = ""
+    desc = request.args.get("dir") == "desc"
 
-s = request.args.get("q", "").strip()
+    shown, where, p, nomatch = cols, "", [], False
+    if s and mode == "column":
+        # "name, city" -> show every column whose name contains "name" or "city"
+        terms = [x.strip().lower() for x in s.split(",") if x.strip()]
+        shown = [c for c in cols if any(x in c["name"].lower() for x in terms)]
+        nomatch = not shown
+    elif s:
+        where = " WHERE " + " OR ".join(f"CAST({q(n)} AS TEXT) LIKE ?" for n in names)
+        p = [f"%{s}%"] * len(names)
 
-sql = f"SELECT rowid,* FROM {q(t)}"
-p = []
-
-if s:
-    conditions = [
-        f"CAST({q(n)} AS TEXT) LIKE ?" for n in names
-    ]
-
-    p = [f"%{s}%"] * len(names)
-
-    # Also match column names
-    matching_columns = [
-        n for n in names if s.lower() in n.lower()
-    ]
-
-    if matching_columns:
-        sql += " WHERE " + " OR ".join(conditions)
-    else:
-        sql += " WHERE " + " OR ".join(conditions)
-
-if request.args.get("order", "") in names:
-    order = request.args.get("order")
-    direction = (
-        "DESC" if request.args.get("dir") == "desc" else "ASC"
-    )
-    sql += f" ORDER BY {q(order)} {direction}"
-
-return render_template(
-    "table.html",
-    t=t,
-    cols=cols,
-    rows=run(sql, p)[1],
-    q=s,
-    order=request.args.get("order", ""),
-    d="DESC" if request.args.get("dir") == "desc" else "ASC",
-    fkopt=fk_options(fks)
-)
+    sel = "".join("," + q(c["name"]) for c in shown)          # rowid first, then the visible columns
+    query = f"SELECT rowid{sel} FROM {q(t)}{where}"
+    if order: query += f" ORDER BY {q(order)} {'DESC' if desc else 'ASC'}"
+    rows = [] if nomatch else run(query, p)[1]
+    return render_template("table.html", t=t, cols=cols, shown=shown, rows=rows, q=s, mode=mode,
+                           order=order, d="DESC" if desc else "ASC", nomatch=nomatch, fkopt=fk_options(fks))
 
 @app.route("/table/<t>/add", methods=["POST"])
 @login_required
@@ -448,14 +430,18 @@ body:has(.login-layout){background:#f3f6fa}
 {% else %}<div class="empty">No tables yet.</div>{% endif %}</section>{% endblock %}""",
 
 "table.html": """{% extends "base.html" %}{% from "macros.html" import field %}{% block title %}{{t|capitalize}}{% endblock %}{% block body %}
-<div class="page-heading"><div><h1>{{t|capitalize}}</h1><p>{{rows|length}} record(s){% if q %} matching “{{q}}”{% endif %}</p></div></div>
-<section class="panel"><form class="toolbar"><input name="q" value="{{q}}" placeholder="Search any column"><select name="order"><option value="">Order by…</option>
-{% for c in cols %}<option {{'selected' if c.name==order}}>{{c.name}}</option>{% endfor %}</select><select name="dir"><option value="asc">Ascending</option><option value="desc" {{'selected' if d=='DESC'}}>Descending</option></select>
+<style>th a.sortlink{color:inherit;display:inline-flex;gap:6px;align-items:center}th a.sortlink:hover{color:var(--teal-dark)}.colchips a{display:inline-block;margin:0 6px 6px 0;padding:6px 11px;border-radius:999px;background:#edf2f8;color:#33445a;font-weight:700;font-size:12px}.colchips a:hover{background:#dce8f2}</style>
+<div class="page-heading"><div><h1>{{t|capitalize}}</h1><p>{{rows|length}} record(s){% if q %} · {% if mode=='column' %}{{shown|length}} of {{cols|length}} column(s) matching “{{q}}”{% else %}matching “{{q}}” in record contents{% endif %}{% endif %}</p></div></div>
+<section class="panel"><form class="toolbar"><input name="q" value="{{q}}" placeholder="{{'Type a column name, e.g. name, city' if mode=='column' else 'Search record contents'}}" size="30">
+<select name="mode"><option value="column" {{'selected' if mode=='column'}}>Search column names</option><option value="data" {{'selected' if mode=='data'}}>Search record contents</option></select>
+<select name="order"><option value="">Order by…</option>{% for c in cols %}<option {{'selected' if c.name==order}}>{{c.name}}</option>{% endfor %}</select>
+<select name="dir"><option value="asc">Ascending</option><option value="desc" {{'selected' if d=='DESC'}}>Descending</option></select>
 <button>Search / Sort</button><a class="btn secondary" href="/table/{{t}}">Reset</a></form>
-<div class="table-wrap"><table><thead><tr>{% for c in cols %}<th>{{c.name}}</th>{% endfor %}<th>Actions</th></tr></thead><tbody>
-{% for r in rows %}<tr>{% for c in cols %}{% set x=r[loop.index] %}<td>{% if c.name in fkopt and x in fkopt[c.name] %}{{fkopt[c.name][x]}}{% elif x is none %}—{% else %}{{x}}{% endif %}</td>{% endfor %}
+{% if nomatch %}<div class="empty">No column name contains “{{q}}”.<br>Columns in this table:</div><div class="colchips" style="text-align:center">{% for c in cols %}<a href="?q={{c.name|urlencode}}&mode=column">{{c.name}}</a>{% endfor %}</div>
+{% else %}<div class="table-wrap"><table><thead><tr>{% for c in shown %}{% set nxt = 'desc' if (order==c.name and d=='ASC') else 'asc' %}<th><a class="sortlink" href="?q={{q|urlencode}}&mode={{mode}}&order={{c.name|urlencode}}&dir={{nxt}}" title="Sort by {{c.name}}">{{c.name}}{% if order==c.name %}<span>{{'▲' if d=='ASC' else '▼'}}</span>{% endif %}</a></th>{% endfor %}<th>Actions</th></tr></thead><tbody>
+{% for r in rows %}<tr>{% for c in shown %}{% set x=r[loop.index] %}<td>{% if c.name in fkopt and x in fkopt[c.name] %}{{fkopt[c.name][x]}}{% elif x is none %}—{% else %}{{x}}{% endif %}</td>{% endfor %}
 <td><a href="/table/{{t}}/edit/{{r[0]}}">Edit</a> &nbsp;<form class="i" method="post" action="/table/{{t}}/delete/{{r[0]}}" onsubmit="return confirm('Delete this record? Related records may be removed too.')"><button>Delete</button></form></td></tr>
-{% else %}<tr><td colspan="{{cols|length+1}}" class="empty">No records found.</td></tr>{% endfor %}</tbody></table></div></section>
+{% else %}<tr><td colspan="{{shown|length+1}}" class="empty">No records found.</td></tr>{% endfor %}</tbody></table></div>{% endif %}</section>
 <section class="panel"><h3>Insert new record</h3><form method="post" action="/table/{{t}}/add"><div class="grid-form">
 {% for c in cols if not c.pk %}<label>{{c.name}}{{field(c, none, fkopt)}}</label>{% endfor %}<button>Insert</button></div></form></section>{% endblock %}""",
 
